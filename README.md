@@ -32,21 +32,20 @@ python scripts/run_abliteration.py --dataset data/prompts/domain_prompts_small.c
 ## Project Structure
 
 ```
-research/abliteration/
+research/obliteration/
 ├── abliteration/                   # Core library
 │   ├── __init__.py
 │   └── core.py                     # All reusable functions
 │
 ├── notebooks/
-│   └── abliteration_research.ipynb # 🌟 Main research tool
+│   ├── abliteration_research.ipynb # 🌟 Main research tool
+│   ├── llm_refusal_anatomy.ipynb   # Analysis of the activation space
+│   └── visualizations.ipynb        # Visualizations
 │
 ├── scripts/
 │   ├── run_abliteration.py         # Full pipeline automation
 │   ├── convert_to_gguf.py          # Model conversion
-│   ├── import_to_ollama.py         # Ollama deployment
-│   ├── quick_test_ollama.py        # Ollama testing
-│   ├── test_ollama_model.py        # Ollama validation
-│   └── verify_setup.py             # Environment check
+│   └── import_to_ollama.py         # Ollama deployment
 │
 ├── data/
 │   ├── prompts/
@@ -61,7 +60,6 @@ research/abliteration/
     ├── QUICKSTART.md               # Quick reference
     ├── experiment_plan.md          # Research guide
     ├── sources_overview.md         # Papers & resources
-    ├── SESSION_NOTES.md            # Historical learnings
     ├── DOMAIN_SPECIFIC_DATASETS.md # Dataset documentation
     ├── GGUF_CONVERSION.md          # Deployment guide
     └── LLM_Abliteration.md         # Theory background
