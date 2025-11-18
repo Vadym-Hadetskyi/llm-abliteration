@@ -1,0 +1,40 @@
+# LLM Abliteration Research - Dependencies
+# Install with: uv pip install -r requirements.txt
+# Latest stable versions as of 2025-10-13
+
+# Core ML frameworks (latest stable)
+torch>=2.8.0
+torchvision>=0.21.0
+torchaudio>=2.8.0
+
+# HuggingFace ecosystem (latest stable)
+transformers>=4.57.0
+accelerate>=1.3.0
+sentencepiece>=0.2.0
+protobuf>=5.29.0
+safetensors>=0.5.0
+
+# TransformerLens for mechanistic interpretability (latest)
+# Note: May not support all models, fallback to pure HF if needed
+transformer-lens>=2.14.0
+
+# Apple Silicon optimization (latest)
+mlx>=0.23.0
+mlx-lm>=0.23.0
+
+# Data science essentials (latest stable)
+numpy>=2.2.0
+pandas>=2.2.0
+matplotlib>=3.10.0
+seaborn>=0.13.0
+
+# Utilities (latest stable)
+einops>=0.8.0
+tqdm>=4.67.0
+datasets>=3.2.0
+jaxtyping>=0.2.0
+
+# Jupyter for interactive analysis
+jupyter>=1.1.0
+ipykernel>=6.30.0
+ipywidgets>=8.1.0
