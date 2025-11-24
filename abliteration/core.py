@@ -96,10 +96,17 @@ def load_model(
 
     def _try_load_model(attn_impl: str):
         """Helper to try loading with specific attention implementation"""
+        # For multi-GPU setups, use "auto" device_map instead of single device
+        # This allows Accelerate to distribute model across all available GPUs
+        actual_device_map = device
+        if device == "cuda" and torch.cuda.device_count() > 1:
+            actual_device_map = "auto"  # Use all available GPUs
+            print(f"   🔧 Multi-GPU detected: Using device_map='auto' to distribute across {torch.cuda.device_count()} GPUs")
+
         return AutoModelForCausalLM.from_pretrained(
             model_name,
             torch_dtype=torch_dtype,
-            device_map=device,
+            device_map=actual_device_map,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
             attn_implementation=attn_impl
