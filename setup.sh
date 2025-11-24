@@ -137,37 +137,6 @@ install_dependencies() {
     log_success "All dependencies installed successfully"
 }
 
-# Clone FailSpy abliterator
-clone_abliterator() {
-    print_header "Setting Up FailSpy Abliterator"
-
-    if [ -d "abliterator" ]; then
-        log_warning "Abliterator directory already exists"
-        read -p "Do you want to update it? (y/n) " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            log_info "Updating abliterator repository..."
-            cd abliterator
-            git pull
-            cd ..
-            log_success "Abliterator updated"
-        else
-            log_info "Using existing abliterator"
-        fi
-    else
-        log_info "Cloning FailSpy abliterator repository..."
-        git clone https://github.com/FailSpy/abliterator.git
-        log_success "Abliterator cloned successfully"
-    fi
-
-    # Install abliterator requirements if they exist
-    if [ -f "abliterator/requirements.txt" ]; then
-        log_info "Installing abliterator requirements..."
-        uv pip install -r abliterator/requirements.txt
-        log_success "Abliterator requirements installed"
-    fi
-}
-
 # Create directory structure
 create_directories() {
     print_header "Creating Directory Structure"
@@ -458,7 +427,6 @@ main() {
     check_prerequisites
     create_venv
     install_dependencies
-    clone_abliterator
     create_directories
     setup_scripts
     create_verification_script

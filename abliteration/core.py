@@ -46,6 +46,17 @@ def load_model(
     warnings.filterwarnings('ignore', message='.*LookupError.*')
     os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Avoid tokenizer warnings
 
+    # Large MoE models that typically require >24GB GPU memory
+    LARGE_MOE_MODELS = [
+        'Qwen1.5-MoE', 'Qwen2-MoE', 'Qwen2.5-MoE',
+        'Mixtral', 'Kimi', 'kimi-k2',
+        'DeepSeek-MoE', 'deepseek-moe'
+    ]
+
+    # Check if this is a large MoE model
+    is_large_moe = any(model_pattern.lower() in model_name.lower()
+                       for model_pattern in LARGE_MOE_MODELS)
+
     if device == "auto":
         if torch.backends.mps.is_available():
             device = "mps"
@@ -53,6 +64,14 @@ def load_model(
             device = "cuda"
         else:
             device = "cpu"
+
+    # Force CPU for large MoE models on MPS (Apple Silicon GPU has limited memory)
+    if is_large_moe and device == "mps":
+        print("⚠️  Large MoE model detected on MPS device (Apple Silicon GPU)")
+        print("   MPS typically has limited memory (~32GB) which may be insufficient")
+        print("   Forcing CPU to avoid 'Invalid buffer size' errors")
+        print("   Note: This will be slower but more reliable\n")
+        device = "cpu"
 
     # Use "auto" dtype for better compatibility across models
     if torch_dtype is None:
@@ -72,15 +91,60 @@ def load_model(
         tokenizer.pad_token = tokenizer.eos_token
 
     # Load model with proper dtype and device handling
-    # Note: Use 'attn_implementation="eager"' to ensure hidden states are available
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch_dtype,
-        device_map=device,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,  # Support models with custom code
-        attn_implementation="eager"  # Ensure hidden states work correctly
-    )
+    # For MoE models, use eager attention for better compatibility
+    # (flash_attention_2 can cause issues with some MoE architectures)
+
+    def _try_load_model(attn_impl: str):
+        """Helper to try loading with specific attention implementation"""
+        return AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            device_map=device,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+            attn_implementation=attn_impl
+        )
+
+    model = None
+
+    # Try eager attention first for MoE models (more compatible)
+    # Try flash_attention_2 first for dense models (faster)
+    attention_order = ["eager", "flash_attention_2"] if is_large_moe else ["flash_attention_2", "eager"]
+
+    for attn_impl in attention_order:
+        try:
+            model = _try_load_model(attn_impl)
+            print(f"   Using {attn_impl} attention")
+            break
+        except (ImportError, ValueError, RuntimeError) as e:
+            error_msg = str(e)
+
+            # Check for GPU memory errors
+            if "Invalid buffer size" in error_msg or "out of memory" in error_msg.lower():
+                if device != "cpu":
+                    print(f"   ⚠️  GPU memory insufficient: {error_msg}")
+                    print(f"   Retrying with CPU...")
+                    device = "cpu"
+                    torch_dtype = torch.float32
+                    try:
+                        model = _try_load_model("eager")
+                        print(f"   ✅ Successfully loaded on CPU")
+                        break
+                    except Exception as cpu_error:
+                        print(f"   ❌ CPU loading also failed: {cpu_error}")
+                        raise
+                else:
+                    raise
+
+            # Try next attention implementation
+            if attn_impl == attention_order[-1]:
+                # Last attempt failed
+                raise
+            else:
+                print(f"   {attn_impl} not available, trying next option...")
+
+    if model is None:
+        raise RuntimeError(f"Failed to load model {model_name} with any attention implementation")
 
     model.eval()  # Set to evaluation mode
 

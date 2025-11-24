@@ -47,6 +47,11 @@ dependencies = [
     "kaleido==0.2.1",
 ]
 
+# Note: flash-attn is optional and requires CUDA GPU
+# It's needed for some MoE models (e.g., Phi-tiny-MoE) but not all
+# Install separately if needed: pip install flash-attn --no-build-isolation
+# Most models will fall back to standard attention if flash-attn is not available
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",

@@ -3,6 +3,8 @@ Abliteration Research Library
 
 Core functionality for LLM abliteration experiments focused on domain-specific
 refusal mechanism removal for cybersecurity research.
+
+Supports both dense models and Mixture-of-Experts (MoE) architectures.
 """
 
 from .core import (
@@ -14,7 +16,7 @@ from .core import (
     extract_activations,
     compute_refusal_direction,
 
-    # Abliteration
+    # Abliteration (dense models)
     orthogonalize_weight,
     abliterate_model,
 
@@ -32,8 +34,27 @@ from .core import (
     save_results,
 )
 
-__version__ = "0.1.0"
+# MoE-specific functionality
+from .moe_core import (
+    # MoE architecture detection
+    detect_moe_architecture,
+    print_moe_summary,
+
+    # MoE abliteration
+    abliterate_model_moe,
+
+    # Expert tracking
+    ExpertActivationTracker,
+
+    # Expert identification (fTRI)
+    compute_expert_resonance,
+    identify_refusal_experts,
+)
+
+__version__ = "0.2.1"  # Fixed GPU memory handling for large MoE models
+
 __all__ = [
+    # Core (dense model support)
     "load_model",
     "save_model",
     "extract_activations",
@@ -47,4 +68,12 @@ __all__ = [
     "compute_similarity_matrix",
     "load_prompts",
     "save_results",
+
+    # MoE-specific
+    "detect_moe_architecture",
+    "print_moe_summary",
+    "abliterate_model_moe",
+    "ExpertActivationTracker",
+    "compute_expert_resonance",
+    "identify_refusal_experts",
 ]

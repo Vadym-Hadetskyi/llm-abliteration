@@ -49,6 +49,17 @@ import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend for scripts
 import matplotlib.pyplot as plt
 import seaborn as sns
+import torch
+import gc
+
+
+def free_memory():
+    """Force Python garbage collection and clear GPU cache"""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 def main():
@@ -156,6 +167,10 @@ def main():
 
                 print(f"✅ Extracted vector shape: {refusal_dir.shape}")
 
+                # Free activation tensors immediately
+                del harmful_acts, harmless_acts
+                free_memory()
+
             with open(domain_vectors_path, 'wb') as f:
                 pickle.dump(domain_vectors, f)
             print(f"\n💾 Saved domain vectors to {domain_vectors_path}")
@@ -185,6 +200,7 @@ def main():
         plt.ylabel('Domain', fontsize=12)
         plt.tight_layout()
         plt.savefig(checkpoint_dir / "similarity_matrix.png", dpi=150, bbox_inches='tight')
+        plt.close('all')  # Free matplotlib memory
         print(f"📊 Saved similarity heatmap to {checkpoint_dir / 'similarity_matrix.png'}")
 
         # Statistical summary
@@ -268,6 +284,7 @@ def main():
             plt.xticks(rotation=45, ha='right')
             plt.tight_layout()
             plt.savefig(checkpoint_dir / "baseline_by_domain.png", dpi=150, bbox_inches='tight')
+            plt.close('all')  # Free matplotlib memory
             print(f"📊 Saved baseline chart to {checkpoint_dir / 'baseline_by_domain.png'}")
             plt.close()
 
@@ -312,7 +329,10 @@ def main():
         print("\nComputing refusal direction...")
         refusal_directions = compute_refusal_direction(harmful_acts, harmless_acts)
 
+        # Free activation tensors immediately
+        del harmful_acts, harmless_acts
         del model
+        free_memory()
 
     # Save vectors
     Path(args.vectors_path).parent.mkdir(parents=True, exist_ok=True)
@@ -335,6 +355,7 @@ def main():
     print("STEP 3: MODEL ABLITERATION")
     print("="*80)
 
+    # MEMORY FIX: Load model once for abliteration
     model, tokenizer = load_model(args.model, device="auto")
 
     print(f"\nApplying abliteration (layers {layer_start:.1f} to {layer_end:.1f})...")
@@ -343,6 +364,11 @@ def main():
 
     print(f"\nSaving abliterated model to {args.output}...")
     save_model(model, tokenizer, args.output)
+
+    # Free the abliterated model before evaluation
+    print("🗑️  Freeing model from memory...")
+    del model, tokenizer
+    free_memory()
 
     # STEP 4: Post-abliteration evaluation
     abliterated_results = None
@@ -353,7 +379,11 @@ def main():
         print("STEP 4: POST-ABLITERATION EVALUATION")
         print("="*80)
 
+        # MEMORY FIX: Load the saved model fresh (prevents memory accumulation)
+        print("Loading abliterated model for evaluation...")
+        model, tokenizer = load_model(args.output, device="auto")
         device_str = str(next(model.parameters()).device)
+
         abliterated_results = evaluate_on_dataset(model, tokenizer, df, device_str, max_new_tokens=150)
 
         # Calculate stats
@@ -394,6 +424,7 @@ def main():
             plt.xticks(rotation=45, ha='right')
             plt.tight_layout()
             plt.savefig(checkpoint_dir / "abliterated_by_domain.png", dpi=150, bbox_inches='tight')
+            plt.close('all')  # Free matplotlib memory
             print(f"📊 Saved abliterated chart to {checkpoint_dir / 'abliterated_by_domain.png'}")
             plt.close()
 
@@ -469,8 +500,13 @@ def main():
                 plt.suptitle('Refusal Rates: Baseline vs. Abliterated', fontsize=16, weight='bold', y=1.02)
                 plt.tight_layout()
                 plt.savefig(checkpoint_dir / "comparison_side_by_side.png", dpi=150, bbox_inches='tight')
+                plt.close('all')  # Free matplotlib memory
                 print(f"📊 Saved comparison chart to {checkpoint_dir / 'comparison_side_by_side.png'}")
                 plt.close()
+
+        # Clean up evaluation model
+        del model, tokenizer
+        free_memory()
 
     else:
         print("\n⏭️  Skipping evaluation and comparison (--skip-analysis)")
