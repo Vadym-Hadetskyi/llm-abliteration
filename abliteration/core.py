@@ -234,7 +234,6 @@ def load_model_for_abliteration(
         "max_memory": max_memory,
         "low_cpu_mem_usage": True,
         "trust_remote_code": True,
-        "offload_state_dict": True,  # Offload state dict during loading
     }
 
     # Add disk offloading if specified
