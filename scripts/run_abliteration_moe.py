@@ -2,7 +2,7 @@
 MoE Abliteration Pipeline - Orchestration Script for Mixture-of-Experts Models
 
 Supports full model abliteration (modify all experts) for MoE architectures like:
-- Kimi K2 Thinking (384 experts)
+- Kimi K2 Thinking (384 experts, 1T params) - requires --optimized-loading
 - Qwen1.5-MoE-A2.7B (60 routing + 4 shared experts)
 - Qwen2-57B-A14B (64 experts)
 - Mixtral-8x7B (8 experts)
@@ -17,12 +17,27 @@ Usage Examples:
       --dataset data/prompts/domain_prompts_small.csv \\
       --output models/abliterated/qwen1.5-moe-abliterated
 
-    # Full pipeline on Kimi K2 (production)
+    # Kimi K2 with optimized loading (RECOMMENDED for large models)
+    # Uses CPU offloading to fit 2TB decompressed model into 8x H100 + 1.8TB RAM
     python scripts/run_abliteration_moe.py \\
       --model /workspace/models/kimi-k2-thinking \\
       --dataset data/prompts/cybersecurity_prompts.csv \\
       --domain cybersecurity \\
-      --output /workspace/models/kimi-k2-abliterated-full
+      --optimized-loading \\
+      --max-gpu-memory 70 \\
+      --max-cpu-memory 1500 \\
+      --layers 0.2,0.8 \\
+      --expert-fraction 0.5 \\
+      --skip-analysis \\
+      --output /workspace/models/kimi-k2-abliterated
+
+    # With disk offloading for extreme memory pressure
+    python scripts/run_abliteration_moe.py \\
+      --model /workspace/models/kimi-k2-thinking \\
+      --optimized-loading \\
+      --offload-folder /workspace/offload \\
+      --skip-analysis \\
+      --output /workspace/models/kimi-k2-abliterated
 
     # Quick test (skip analysis)
     python scripts/run_abliteration_moe.py \\
@@ -41,9 +56,10 @@ project_root = script_dir.parent
 sys.path.insert(0, str(project_root))
 
 from abliteration.core import (
-    load_model, save_model, extract_activations, compute_refusal_direction,
+    load_model, load_model_for_abliteration, save_model,
+    extract_activations, compute_refusal_direction,
     evaluate_on_dataset, save_results, load_prompts,
-    compute_similarity_matrix
+    compute_similarity_matrix, free_memory
 )
 from abliteration.moe_core import (
     detect_moe_architecture, print_moe_summary, abliterate_model_moe
@@ -61,13 +77,7 @@ import torch
 import gc
 
 
-def free_memory():
-    """Force Python garbage collection and clear GPU cache"""
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-    elif torch.backends.mps.is_available():
-        torch.mps.empty_cache()
+# Note: free_memory() is now imported from abliteration.core
 
 
 def main():
@@ -103,6 +113,16 @@ def main():
     parser.add_argument("--checkpoint-dir", default="data/checkpoints/moe",
                        help="Directory for checkpoints and results")
 
+    # Memory optimization for large models (Kimi K2)
+    parser.add_argument("--optimized-loading", action="store_true",
+                       help="Use optimized loading with CPU offloading (recommended for Kimi K2)")
+    parser.add_argument("--max-gpu-memory", type=float, default=70.0,
+                       help="Max GPU memory per device in GB (default: 70)")
+    parser.add_argument("--max-cpu-memory", type=float, default=1500.0,
+                       help="Max CPU memory in GB (default: 1500 for a3-highgpu-8g)")
+    parser.add_argument("--offload-folder", default=None,
+                       help="Folder for disk offloading (optional, for extreme cases)")
+
     args = parser.parse_args()
 
     # Parse layer range
@@ -136,8 +156,32 @@ def main():
     print("="*80)
 
     print(f"\nLoading model: {args.model}")
-    model, tokenizer = load_model(args.model, device="auto")
-    device_str = str(next(model.parameters()).device)
+
+    # Use optimized loading for large models like Kimi K2
+    if args.optimized_loading:
+        print("🔧 Using optimized loading with CPU offloading...")
+        model, tokenizer = load_model_for_abliteration(
+            args.model,
+            max_gpu_memory_gb=args.max_gpu_memory,
+            max_cpu_memory_gb=args.max_cpu_memory,
+            offload_folder=args.offload_folder,
+        )
+    else:
+        model, tokenizer = load_model(args.model, device="auto")
+
+    # Get device - for multi-device models, get the device of the first layer
+    try:
+        # For models distributed across devices
+        first_param = next(model.parameters())
+        device_str = str(first_param.device)
+    except StopIteration:
+        device_str = "cpu"
+
+    # For models with CPU offloading, we need to handle device placement carefully
+    if "cpu" in device_str and torch.cuda.is_available():
+        # Model has some layers on CPU, use the first GPU for operations
+        device_str = "cuda:0"
+        print(f"   Note: Model uses CPU offloading, using {device_str} for operations")
 
     # Inspect MoE architecture
     print_moe_summary(model)

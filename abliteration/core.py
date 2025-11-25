@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple, Optional, Union
 import json
 from datetime import datetime
 from pathlib import Path
+import gc
 
 
 # ============================================================================
@@ -161,6 +162,136 @@ def load_model(
     print(f"   Hidden size: {model.config.hidden_size}")
 
     return model, tokenizer
+
+
+def load_model_for_abliteration(
+    model_name: str,
+    max_gpu_memory_gb: float = 70.0,
+    max_cpu_memory_gb: float = 1500.0,
+    offload_folder: Optional[str] = None,
+    torch_dtype=None,
+) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
+    """
+    Load large models (like Kimi K2) with optimized memory management for abliteration.
+
+    This function is specifically designed for models that are too large to fit
+    entirely in GPU memory. It uses:
+    - Explicit max_memory constraints per GPU
+    - CPU offloading for layers that don't fit
+    - Optional disk offloading for extreme cases
+
+    For Kimi K2 Thinking (~594GB INT4, ~2TB decompressed):
+    - 8x H100 80GB = 640GB GPU memory
+    - Decompressed model needs ~2TB
+    - Solution: Load ~600GB to GPUs, ~1.4TB to CPU RAM
+
+    Args:
+        model_name: HuggingFace model name or local path
+        max_gpu_memory_gb: Max memory per GPU in GB (default: 70GB, leaves headroom)
+        max_cpu_memory_gb: Max CPU memory in GB (default: 1500GB for a3-highgpu-8g)
+        offload_folder: Optional folder for disk offloading (for extreme cases)
+        torch_dtype: Torch dtype (default: bfloat16 for efficiency)
+
+    Returns:
+        (model, tokenizer) tuple
+    """
+    import warnings
+    import os
+    warnings.filterwarnings('ignore', message='.*LookupError.*')
+    os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+    print(f"Loading model: {model_name}")
+    print(f"🔧 Optimized loading for large models with CPU offloading")
+
+    # Default to bfloat16 for efficiency
+    if torch_dtype is None:
+        torch_dtype = torch.bfloat16
+
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    # Build max_memory dict for explicit memory management
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    max_memory = {}
+
+    if num_gpus > 0:
+        for i in range(num_gpus):
+            max_memory[i] = f"{max_gpu_memory_gb:.0f}GiB"
+        print(f"   📊 GPU memory limit: {max_gpu_memory_gb:.0f}GB x {num_gpus} GPUs = {max_gpu_memory_gb * num_gpus:.0f}GB total")
+
+    max_memory["cpu"] = f"{max_cpu_memory_gb:.0f}GiB"
+    print(f"   📊 CPU memory limit: {max_cpu_memory_gb:.0f}GB")
+
+    # Prepare loading kwargs
+    load_kwargs = {
+        "torch_dtype": torch_dtype,
+        "device_map": "auto",
+        "max_memory": max_memory,
+        "low_cpu_mem_usage": True,
+        "trust_remote_code": True,
+        "offload_state_dict": True,  # Offload state dict during loading
+    }
+
+    # Add disk offloading if specified
+    if offload_folder:
+        Path(offload_folder).mkdir(parents=True, exist_ok=True)
+        load_kwargs["offload_folder"] = offload_folder
+        print(f"   💾 Disk offload folder: {offload_folder}")
+
+    # Try loading with eager attention (most compatible for large MoE models)
+    print(f"\n⏳ Loading model (this may take 30-60 minutes for Kimi K2)...")
+    print(f"   The 'Compressing model' progress bar is actually decompression.")
+    print(f"   INT4 → BF16 expansion increases memory ~4x during load.\n")
+
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            attn_implementation="eager",
+            **load_kwargs
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "out of memory" in error_msg.lower():
+            print(f"\n⚠️  OOM during loading. Try reducing max_gpu_memory_gb or adding disk offloading.")
+            print(f"   Current settings: {max_gpu_memory_gb}GB/GPU, {max_cpu_memory_gb}GB CPU")
+            if not offload_folder:
+                print(f"   Suggestion: Add offload_folder='/workspace/offload' for disk offloading")
+        raise
+
+    model.eval()
+
+    # Print memory usage summary
+    if torch.cuda.is_available():
+        print(f"\n📊 Memory Usage After Loading:")
+        total_gpu_used = 0
+        for i in range(num_gpus):
+            allocated = torch.cuda.memory_allocated(i) / 1024**3
+            reserved = torch.cuda.memory_reserved(i) / 1024**3
+            total_gpu_used += allocated
+            print(f"   GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved")
+        print(f"   Total GPU: {total_gpu_used:.1f}GB")
+
+    print(f"\n✅ Model loaded successfully")
+    print(f"   Architecture: {model.config.model_type if hasattr(model.config, 'model_type') else 'unknown'}")
+    print(f"   Layers: {model.config.num_hidden_layers}")
+    print(f"   Hidden size: {model.config.hidden_size}")
+
+    return model, tokenizer
+
+
+def free_memory():
+    """Force garbage collection and clear GPU/CPU caches."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        torch.mps.empty_cache()
 
 
 def save_model(

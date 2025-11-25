@@ -10,7 +10,9 @@ Supports both dense models and Mixture-of-Experts (MoE) architectures.
 from .core import (
     # Model management
     load_model,
+    load_model_for_abliteration,  # Optimized loading for large models
     save_model,
+    free_memory,
 
     # Activation extraction
     extract_activations,
@@ -34,6 +36,13 @@ from .core import (
     save_results,
 )
 
+# Dequantization utilities for compressed models (Kimi K2, etc.)
+from .dequant import (
+    dequantize_model_shards,
+    dequantize_int4_tensor,
+    estimate_dequantized_size,
+)
+
 # MoE-specific functionality
 from .moe_core import (
     # MoE architecture detection
@@ -51,12 +60,14 @@ from .moe_core import (
     identify_refusal_experts,
 )
 
-__version__ = "0.2.1"  # Fixed GPU memory handling for large MoE models
+__version__ = "0.3.0"  # Added optimized loading for Kimi K2 and dequantization utilities
 
 __all__ = [
     # Core (dense model support)
     "load_model",
+    "load_model_for_abliteration",
     "save_model",
+    "free_memory",
     "extract_activations",
     "compute_refusal_direction",
     "orthogonalize_weight",
@@ -68,6 +79,11 @@ __all__ = [
     "compute_similarity_matrix",
     "load_prompts",
     "save_results",
+
+    # Dequantization utilities
+    "dequantize_model_shards",
+    "dequantize_int4_tensor",
+    "estimate_dequantized_size",
 
     # MoE-specific
     "detect_moe_architecture",
