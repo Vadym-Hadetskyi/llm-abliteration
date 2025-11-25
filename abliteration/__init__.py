@@ -43,6 +43,14 @@ from .dequant import (
     estimate_dequantized_size,
 )
 
+# Quantization utilities for saving abliterated models
+from .quantize import (
+    quantize_model_int4,
+    quantize_model_simple,
+    save_quantized_model,
+    estimate_quantized_size,
+)
+
 # MoE-specific functionality
 from .moe_core import (
     # MoE architecture detection
@@ -60,7 +68,7 @@ from .moe_core import (
     identify_refusal_experts,
 )
 
-__version__ = "0.3.0"  # Added optimized loading for Kimi K2 and dequantization utilities
+__version__ = "0.4.0"  # Added INT4 quantization for saving abliterated models
 
 __all__ = [
     # Core (dense model support)
@@ -84,6 +92,12 @@ __all__ = [
     "dequantize_model_shards",
     "dequantize_int4_tensor",
     "estimate_dequantized_size",
+
+    # Quantization utilities
+    "quantize_model_int4",
+    "quantize_model_simple",
+    "save_quantized_model",
+    "estimate_quantized_size",
 
     # MoE-specific
     "detect_moe_architecture",

@@ -17,8 +17,9 @@ Usage Examples:
       --dataset data/prompts/domain_prompts_small.csv \\
       --output models/abliterated/qwen1.5-moe-abliterated
 
-    # Kimi K2 with optimized loading (RECOMMENDED for large models)
+    # Kimi K2 with optimized loading and INT4 quantization for HuggingFace
     # Uses CPU offloading to fit 2TB decompressed model into 8x H100 + 1.8TB RAM
+    # Re-quantizes to INT4 before saving (~600GB instead of ~2TB)
     python scripts/run_abliteration_moe.py \\
       --model /workspace/models/kimi-k2-thinking \\
       --dataset data/prompts/cybersecurity_prompts.csv \\
@@ -29,6 +30,7 @@ Usage Examples:
       --layers 0.2,0.8 \\
       --expert-fraction 0.5 \\
       --skip-analysis \\
+      --quantize-output \\
       --output /workspace/models/kimi-k2-abliterated
 
     # With disk offloading for extreme memory pressure
@@ -37,6 +39,7 @@ Usage Examples:
       --optimized-loading \\
       --offload-folder /workspace/offload \\
       --skip-analysis \\
+      --quantize-output \\
       --output /workspace/models/kimi-k2-abliterated
 
     # Quick test (skip analysis)
@@ -122,6 +125,12 @@ def main():
                        help="Max CPU memory in GB (default: 1500 for a3-highgpu-8g)")
     parser.add_argument("--offload-folder", default=None,
                        help="Folder for disk offloading (optional, for extreme cases)")
+
+    # Output format options
+    parser.add_argument("--quantize-output", action="store_true",
+                       help="Re-quantize to INT4 before saving (recommended for HuggingFace, saves ~70%% disk space)")
+    parser.add_argument("--quantize-simple", action="store_true",
+                       help="Use simple min-max quantization instead of GPTQ (faster but lower quality)")
 
     args = parser.parse_args()
 
@@ -432,8 +441,39 @@ def main():
         verbose=True
     )
 
-    print(f"\nSaving abliterated model to {args.output}...")
-    save_model(model, tokenizer, args.output)
+    # Save the abliterated model (with optional quantization)
+    print(f"\n💾 Saving abliterated model to {args.output}...")
+
+    if args.quantize_output:
+        from abliteration.quantize import (
+            quantize_model_int4, quantize_model_simple,
+            save_quantized_model, estimate_quantized_size
+        )
+
+        # Show size estimates
+        size_info = estimate_quantized_size(model)
+        print(f"\n📊 Size estimates:")
+        print(f"   BF16 (uncompressed): {size_info['bf16_gb']:.1f} GB")
+        print(f"   INT4 (compressed):   {size_info['int4_gb']:.1f} GB")
+        print(f"   Compression ratio:   {size_info['compression_ratio']:.1f}x")
+
+        # Apply quantization
+        if args.quantize_simple:
+            print("\n🔧 Using simple min-max quantization (faster)...")
+            quantize_model_simple(model, verbose=True)
+        else:
+            print("\n🔧 Using GPTQ-style quantization (higher quality)...")
+            try:
+                quantize_model_int4(model, verbose=True)
+            except ImportError as e:
+                print(f"\n⚠️  llm-compressor not available: {e}")
+                print("   Falling back to simple quantization...")
+                quantize_model_simple(model, verbose=True)
+
+        # Save with quantization config
+        save_quantized_model(model, tokenizer, args.output, verbose=True)
+    else:
+        save_model(model, tokenizer, args.output)
 
     # Free the abliterated model before evaluation
     print("🗑️  Freeing model from memory...")

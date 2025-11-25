@@ -95,7 +95,7 @@ def load_model(
     # For MoE models, use eager attention for better compatibility
     # (flash_attention_2 can cause issues with some MoE architectures)
 
-    def _try_load_model(attn_impl: str):
+    def _try_load_model(attn_impl: str, trust_remote: bool = False):
         """Helper to try loading with specific attention implementation"""
         # For multi-GPU setups, use "auto" device_map instead of single device
         # This allows Accelerate to distribute model across all available GPUs
@@ -109,7 +109,7 @@ def load_model(
             torch_dtype=torch_dtype,
             device_map=actual_device_map,
             low_cpu_mem_usage=True,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote,
             attn_implementation=attn_impl
         )
 
@@ -119,37 +119,54 @@ def load_model(
     # Try flash_attention_2 first for dense models (faster)
     attention_order = ["eager", "flash_attention_2"] if is_large_moe else ["flash_attention_2", "eager"]
 
-    for attn_impl in attention_order:
-        try:
-            model = _try_load_model(attn_impl)
-            print(f"   Using {attn_impl} attention")
+    # Try native transformers first (no trust_remote_code), then fall back to custom code
+    # This avoids issues with outdated custom modeling code in model repos
+    for trust_remote in [False, True]:
+        if model is not None:
             break
-        except (ImportError, ValueError, RuntimeError) as e:
-            error_msg = str(e)
 
-            # Check for GPU memory errors
-            if "Invalid buffer size" in error_msg or "out of memory" in error_msg.lower():
-                if device != "cpu":
-                    print(f"   ⚠️  GPU memory insufficient: {error_msg}")
-                    print(f"   Retrying with CPU...")
-                    device = "cpu"
-                    torch_dtype = torch.float32
-                    try:
-                        model = _try_load_model("eager")
-                        print(f"   ✅ Successfully loaded on CPU")
-                        break
-                    except Exception as cpu_error:
-                        print(f"   ❌ CPU loading also failed: {cpu_error}")
-                        raise
+        for attn_impl in attention_order:
+            try:
+                model = _try_load_model(attn_impl, trust_remote=trust_remote)
+                if trust_remote:
+                    print(f"   Using {attn_impl} attention (with custom model code)")
                 else:
-                    raise
+                    print(f"   Using {attn_impl} attention (native transformers)")
+                break
+            except (ImportError, ValueError, RuntimeError, KeyError) as e:
+                error_msg = str(e)
 
-            # Try next attention implementation
-            if attn_impl == attention_order[-1]:
-                # Last attempt failed
-                raise
-            else:
-                print(f"   {attn_impl} not available, trying next option...")
+                # Check for GPU memory errors
+                if "Invalid buffer size" in error_msg or "out of memory" in error_msg.lower():
+                    if device != "cpu":
+                        print(f"   ⚠️  GPU memory insufficient: {error_msg}")
+                        print(f"   Retrying with CPU...")
+                        device = "cpu"
+                        torch_dtype = torch.float32
+                        try:
+                            model = _try_load_model("eager", trust_remote=trust_remote)
+                            print(f"   ✅ Successfully loaded on CPU")
+                            break
+                        except Exception as cpu_error:
+                            print(f"   ❌ CPU loading also failed: {cpu_error}")
+                            continue
+                    else:
+                        continue
+
+                # Check if model type not recognized (need custom code)
+                if "not a valid model" in error_msg.lower() or "unrecognized" in error_msg.lower():
+                    if not trust_remote:
+                        # Will retry with trust_remote_code=True
+                        break
+
+                # Try next attention implementation
+                if attn_impl == attention_order[-1]:
+                    if not trust_remote:
+                        # Will retry with trust_remote_code=True
+                        print(f"   Native loading failed, trying with custom model code...")
+                    # else: will raise after loop
+                else:
+                    print(f"   {attn_impl} not available, trying next option...")
 
     if model is None:
         raise RuntimeError(f"Failed to load model {model_name} with any attention implementation")
@@ -247,20 +264,39 @@ def load_model_for_abliteration(
     print(f"   The 'Compressing model' progress bar is actually decompression.")
     print(f"   INT4 → BF16 expansion increases memory ~4x during load.\n")
 
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            attn_implementation="eager",
-            **load_kwargs
-        )
-    except Exception as e:
-        error_msg = str(e)
-        if "out of memory" in error_msg.lower():
-            print(f"\n⚠️  OOM during loading. Try reducing max_gpu_memory_gb or adding disk offloading.")
-            print(f"   Current settings: {max_gpu_memory_gb}GB/GPU, {max_cpu_memory_gb}GB CPU")
-            if not offload_folder:
-                print(f"   Suggestion: Add offload_folder='/workspace/offload' for disk offloading")
-        raise
+    model = None
+
+    # Try native transformers first, fall back to custom code if needed
+    for trust_remote in [False, True]:
+        load_kwargs["trust_remote_code"] = trust_remote
+        try:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                attn_implementation="eager",
+                **load_kwargs
+            )
+            if trust_remote:
+                print(f"   Using custom model code from repository")
+            else:
+                print(f"   Using native transformers implementation")
+            break
+        except Exception as e:
+            error_msg = str(e)
+            if "out of memory" in error_msg.lower():
+                print(f"\n⚠️  OOM during loading. Try reducing max_gpu_memory_gb or adding disk offloading.")
+                print(f"   Current settings: {max_gpu_memory_gb}GB/GPU, {max_cpu_memory_gb}GB CPU")
+                if not offload_folder:
+                    print(f"   Suggestion: Add offload_folder='/workspace/offload' for disk offloading")
+                raise
+            elif not trust_remote:
+                # Try with custom code
+                print(f"   Native loading failed, trying with custom model code...")
+                continue
+            else:
+                raise
+
+    if model is None:
+        raise RuntimeError(f"Failed to load model {model_name}")
 
     model.eval()
 

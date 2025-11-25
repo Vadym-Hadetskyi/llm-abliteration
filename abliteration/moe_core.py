@@ -49,11 +49,12 @@ def detect_moe_architecture(model: AutoModelForCausalLM) -> Dict:
         Dictionary with MoE architecture info:
         {
             'is_moe': bool,
-            'architecture_type': str,  # 'qwen_moe', 'mixtral', 'kimi', etc.
+            'architecture_type': str,  # 'qwen_moe', 'mixtral', 'deepseek_v3', 'kimi_k2', etc.
             'num_experts': int,
             'experts_per_token': int,
             'has_shared_expert': bool,
-            'expert_path_template': str  # Path to access experts in layer
+            'expert_path_template': str,  # Path to access experts in layer
+            'first_moe_layer': int,  # Index of first MoE layer (some models have dense first layers)
         }
     """
     arch_info = {
@@ -62,10 +63,45 @@ def detect_moe_architecture(model: AutoModelForCausalLM) -> Dict:
         'num_experts': 0,
         'experts_per_token': 0,
         'has_shared_expert': False,
-        'expert_path_template': None
+        'expert_path_template': None,
+        'first_moe_layer': 0,
     }
 
-    # Get first layer for inspection
+    # Check model config first - most reliable source for MoE info
+    config = model.config
+    model_type = getattr(config, 'model_type', '').lower()
+
+    # DeepSeek V3 / Kimi K2 architecture detection via config
+    # These models use n_routed_experts in config and have a special structure
+    if hasattr(config, 'n_routed_experts') and config.n_routed_experts is not None:
+        arch_info['is_moe'] = True
+        arch_info['num_experts'] = config.n_routed_experts
+
+        # Determine architecture type
+        if 'kimi' in model_type or 'kimi' in str(getattr(config, '_name_or_path', '')).lower():
+            arch_info['architecture_type'] = 'kimi_k2'
+        elif 'deepseek' in model_type:
+            arch_info['architecture_type'] = 'deepseek_v3'
+        else:
+            arch_info['architecture_type'] = 'deepseek_moe'
+
+        arch_info['expert_path_template'] = 'mlp.experts'  # DeepseekV3NaiveMoe object
+
+        # Get experts per token
+        if hasattr(config, 'num_experts_per_tok'):
+            arch_info['experts_per_token'] = config.num_experts_per_tok
+
+        # Check for shared experts
+        if hasattr(config, 'n_shared_experts') and config.n_shared_experts:
+            arch_info['has_shared_expert'] = True
+
+        # DeepSeek V3 has dense layers at the beginning (first_k_dense_replace)
+        if hasattr(config, 'first_k_dense_replace'):
+            arch_info['first_moe_layer'] = config.first_k_dense_replace
+
+        return arch_info
+
+    # Get layers for manual inspection
     if hasattr(model, 'model'):
         layers = model.model.layers
     elif hasattr(model, 'transformer'):
@@ -76,16 +112,31 @@ def detect_moe_architecture(model: AutoModelForCausalLM) -> Dict:
     if len(layers) == 0:
         return arch_info
 
-    first_layer = layers[0]
+    # Find first MoE layer (some architectures have dense layers first)
+    first_moe_layer_idx = 0
+    for idx, layer in enumerate(layers):
+        if hasattr(layer, 'mlp'):
+            mlp = layer.mlp
+            # Check if this layer has expert structure
+            if hasattr(mlp, 'experts') or hasattr(mlp, 'gate'):
+                first_moe_layer_idx = idx
+                break
+
+    # Use the first MoE layer for inspection
+    inspection_layer = layers[first_moe_layer_idx] if first_moe_layer_idx < len(layers) else layers[0]
 
     # Check for MoE structure in MLP
-    if hasattr(first_layer, 'mlp'):
-        mlp = first_layer.mlp
+    if hasattr(inspection_layer, 'mlp'):
+        mlp = inspection_layer.mlp
 
-        # Qwen MoE architecture
+        # DeepSeek V3 / Kimi K2 architecture (experts is not a ModuleList, but a custom class)
+        # This handles cases where config detection didn't catch it
         if hasattr(mlp, 'experts') and hasattr(mlp, 'gate'):
             experts = mlp.experts
+
+            # Check if it's a ModuleList (Qwen style) or a custom expert class (DeepSeek style)
             if isinstance(experts, torch.nn.ModuleList):
+                # Qwen MoE architecture
                 arch_info['is_moe'] = True
                 arch_info['architecture_type'] = 'qwen_moe'
                 arch_info['num_experts'] = len(experts)
@@ -97,11 +148,36 @@ def detect_moe_architecture(model: AutoModelForCausalLM) -> Dict:
 
                 # Infer experts per token from gate config
                 if hasattr(mlp.gate, 'config'):
-                    config = mlp.gate.config
-                    if hasattr(config, 'num_experts_per_tok'):
-                        arch_info['experts_per_token'] = config.num_experts_per_tok
-                    elif hasattr(config, 'top_k'):
-                        arch_info['experts_per_token'] = config.top_k
+                    gate_config = mlp.gate.config
+                    if hasattr(gate_config, 'num_experts_per_tok'):
+                        arch_info['experts_per_token'] = gate_config.num_experts_per_tok
+                    elif hasattr(gate_config, 'top_k'):
+                        arch_info['experts_per_token'] = gate_config.top_k
+
+            else:
+                # DeepSeek V3 style - experts is a custom class (DeepseekV3NaiveMoe)
+                # with gate_up_proj and down_proj as 3D tensors
+                arch_info['is_moe'] = True
+
+                if 'kimi' in model_type or 'kimi' in str(type(model).__name__).lower():
+                    arch_info['architecture_type'] = 'kimi_k2'
+                elif 'deepseek' in model_type:
+                    arch_info['architecture_type'] = 'deepseek_v3'
+                else:
+                    arch_info['architecture_type'] = 'deepseek_moe'
+
+                arch_info['expert_path_template'] = 'mlp.experts'
+
+                # Try to infer number of experts from tensor shapes
+                if hasattr(experts, 'gate_up_proj'):
+                    # Shape is typically (num_experts, intermediate_size, hidden_size)
+                    arch_info['num_experts'] = experts.gate_up_proj.shape[0]
+                elif hasattr(experts, 'down_proj'):
+                    arch_info['num_experts'] = experts.down_proj.shape[0]
+
+                # Check for shared experts
+                if hasattr(mlp, 'shared_experts'):
+                    arch_info['has_shared_expert'] = True
 
         # Mixtral MoE architecture (different structure)
         elif hasattr(mlp, 'experts') and hasattr(mlp, 'router'):
@@ -110,11 +186,25 @@ def detect_moe_architecture(model: AutoModelForCausalLM) -> Dict:
             arch_info['num_experts'] = len(mlp.experts)
             arch_info['expert_path_template'] = 'mlp.experts[{expert_idx}]'
 
-    # Add model config info if available
-    if hasattr(model.config, 'num_local_experts'):
-        arch_info['num_experts'] = model.config.num_local_experts
-    if hasattr(model.config, 'num_experts_per_tok'):
-        arch_info['experts_per_token'] = model.config.num_experts_per_tok
+    # Override with config info if available (most authoritative source)
+    if hasattr(config, 'num_local_experts') and config.num_local_experts:
+        arch_info['num_experts'] = config.num_local_experts
+        if not arch_info['is_moe']:
+            arch_info['is_moe'] = True
+            arch_info['architecture_type'] = 'generic_moe'
+
+    if hasattr(config, 'num_experts_per_tok') and config.num_experts_per_tok:
+        arch_info['experts_per_token'] = config.num_experts_per_tok
+        if not arch_info['is_moe']:
+            arch_info['is_moe'] = True
+            arch_info['architecture_type'] = 'generic_moe'
+
+    if hasattr(config, 'n_routed_experts') and config.n_routed_experts:
+        arch_info['num_experts'] = config.n_routed_experts
+        if not arch_info['is_moe']:
+            arch_info['is_moe'] = True
+
+    arch_info['first_moe_layer'] = first_moe_layer_idx
 
     return arch_info
 
@@ -582,8 +672,20 @@ def print_moe_summary(model: AutoModelForCausalLM):
         # Calculate total parameters
         if hasattr(model.config, 'num_hidden_layers'):
             n_layers = model.config.num_hidden_layers
-            total_routed_experts = arch_info['num_experts'] * n_layers
+            first_moe = arch_info.get('first_moe_layer', 0)
+            moe_layers = n_layers - first_moe
+            total_routed_experts = arch_info['num_experts'] * moe_layers
             print(f"\n   Total layers:         {n_layers}")
+            if first_moe > 0:
+                print(f"   Dense layers:         {first_moe} (first layers are dense)")
+                print(f"   MoE layers:           {moe_layers}")
             print(f"   Total routed experts: {total_routed_experts}")
+
+        # Extra config info for DeepSeek/Kimi architectures
+        config = model.config
+        if hasattr(config, 'n_shared_experts'):
+            print(f"   Shared experts:       {config.n_shared_experts}")
+        if hasattr(config, 'moe_intermediate_size'):
+            print(f"   MoE hidden size:      {config.moe_intermediate_size}")
 
     print("="*70 + "\n")
