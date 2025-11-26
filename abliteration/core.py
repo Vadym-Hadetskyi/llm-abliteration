@@ -378,44 +378,55 @@ def extract_activations(
 
     print(f"Extracting activations for {len(prompts)} prompts...")
 
-    for prompt in tqdm(prompts):
-        # Format as chat message
-        messages = [{"role": "user", "content": prompt}]
-        text = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True
-        )
+    # Disable caching to avoid DynamicCache compatibility issues with newer transformers
+    # (get_usable_length was removed in transformers 4.46+, but some custom model code still uses it)
+    # We don't need caching for activation extraction anyway
+    original_use_cache = getattr(model.config, 'use_cache', True)
+    model.config.use_cache = False
 
-        # Tokenize
-        inputs = tokenizer(text, return_tensors="pt", padding=True).to(device)
-
-        # Forward pass with explicit output_hidden_states=True
-        with torch.no_grad():
-            outputs = model(**inputs, output_hidden_states=True)
-
-        # Extract hidden states from all layers (skip embedding layer at index 0)
-        hidden_states = outputs.hidden_states
-
-        if hidden_states is None:
-            raise RuntimeError(
-                f"Model did not return hidden states. "
-                f"This may be due to attention implementation. "
-                f"Try reloading the model or using a different model architecture."
+    try:
+        for prompt in tqdm(prompts):
+            # Format as chat message
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
             )
-        layer_activations = []
 
-        for layer_idx in range(1, len(hidden_states)):
-            # Take mean across sequence length
-            # Shape: (batch_size=1, seq_len, hidden_dim) -> (hidden_dim,)
-            # Convert to float32 first if bfloat16 (not supported by numpy)
-            layer_hidden = hidden_states[layer_idx].mean(dim=1).squeeze(0)
-            if layer_hidden.dtype == torch.bfloat16:
-                layer_hidden = layer_hidden.to(torch.float32)
-            layer_mean = layer_hidden.cpu().numpy()
-            layer_activations.append(layer_mean)
+            # Tokenize
+            inputs = tokenizer(text, return_tensors="pt", padding=True).to(device)
 
-        all_activations.append(np.array(layer_activations))
+            # Forward pass with explicit output_hidden_states=True
+            with torch.no_grad():
+                outputs = model(**inputs, output_hidden_states=True, use_cache=False)
+
+            # Extract hidden states from all layers (skip embedding layer at index 0)
+            hidden_states = outputs.hidden_states
+
+            if hidden_states is None:
+                raise RuntimeError(
+                    f"Model did not return hidden states. "
+                    f"This may be due to attention implementation. "
+                    f"Try reloading the model or using a different model architecture."
+                )
+            layer_activations = []
+
+            for layer_idx in range(1, len(hidden_states)):
+                # Take mean across sequence length
+                # Shape: (batch_size=1, seq_len, hidden_dim) -> (hidden_dim,)
+                # Convert to float32 first if bfloat16 (not supported by numpy)
+                layer_hidden = hidden_states[layer_idx].mean(dim=1).squeeze(0)
+                if layer_hidden.dtype == torch.bfloat16:
+                    layer_hidden = layer_hidden.to(torch.float32)
+                layer_mean = layer_hidden.cpu().numpy()
+                layer_activations.append(layer_mean)
+
+            all_activations.append(np.array(layer_activations))
+
+    finally:
+        # Restore original cache setting
+        model.config.use_cache = original_use_cache
 
     # Stack into array: (n_prompts, n_layers, hidden_dim)
     return np.array(all_activations)
