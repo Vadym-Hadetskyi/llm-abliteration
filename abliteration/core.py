@@ -360,7 +360,8 @@ def extract_activations(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompts: List[str],
-    device: str
+    device: str,
+    memory_efficient: bool = True
 ) -> np.ndarray:
     """
     Extract hidden states (activations) for a list of prompts.
@@ -370,17 +371,143 @@ def extract_activations(
         tokenizer: Tokenizer for the model
         prompts: List of prompt strings
         device: Device model is on
+        memory_efficient: If True, use hooks to extract activations layer-by-layer
+                         (much lower GPU memory usage, required for very large models)
 
     Returns:
         Array of shape (n_prompts, n_layers, hidden_dim)
+    """
+    if memory_efficient:
+        return _extract_activations_hooks(model, tokenizer, prompts, device)
+    else:
+        return _extract_activations_standard(model, tokenizer, prompts, device)
+
+
+def _extract_activations_hooks(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: List[str],
+    device: str
+) -> np.ndarray:
+    """
+    Memory-efficient activation extraction using forward hooks.
+
+    Instead of storing all hidden states in GPU memory (which can OOM on large models),
+    this uses hooks to capture each layer's output and immediately move it to CPU.
+
+    This is essential for models like Kimi K2 where output_hidden_states=True
+    would require storing 61 layers × seq_len × 7168 dims on GPU.
+    """
+    all_activations = []
+
+    print(f"Extracting activations for {len(prompts)} prompts (memory-efficient mode)...")
+
+    # Disable caching to avoid DynamicCache compatibility issues
+    original_use_cache = getattr(model.config, 'use_cache', True)
+    model.config.use_cache = False
+
+    # Find the decoder layers
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        layers = model.model.layers
+    elif hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+        layers = model.transformer.h
+    else:
+        print("   ⚠️  Could not find decoder layers, falling back to standard extraction")
+        model.config.use_cache = original_use_cache
+        return _extract_activations_standard(model, tokenizer, prompts, device)
+
+    n_layers = len(layers)
+    print(f"   Found {n_layers} decoder layers")
+
+    # Storage for captured activations (on CPU)
+    captured_activations = []
+    hooks = []
+
+    def make_hook(layer_idx):
+        """Create a hook that captures layer output and moves to CPU immediately."""
+        def hook(module, input, output):
+            # output is typically (hidden_states, ...) or just hidden_states
+            if isinstance(output, tuple):
+                hidden = output[0]
+            else:
+                hidden = output
+
+            # Mean across sequence, move to CPU immediately to free GPU memory
+            # Shape: (batch=1, seq_len, hidden_dim) -> (hidden_dim,)
+            with torch.no_grad():
+                layer_mean = hidden.mean(dim=1).squeeze(0)
+                if layer_mean.dtype == torch.bfloat16:
+                    layer_mean = layer_mean.float()
+                captured_activations.append(layer_mean.cpu().numpy())
+
+        return hook
+
+    try:
+        # Register hooks on all layers
+        for idx, layer in enumerate(layers):
+            hook = layer.register_forward_hook(make_hook(idx))
+            hooks.append(hook)
+
+        # Process each prompt
+        for prompt in tqdm(prompts):
+            # Clear previous activations
+            captured_activations.clear()
+
+            # Format as chat message
+            messages = [{"role": "user", "content": prompt}]
+            text = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            # Tokenize
+            inputs = tokenizer(text, return_tensors="pt", padding=True).to(device)
+
+            # Forward pass - hooks will capture activations
+            with torch.no_grad():
+                _ = model(**inputs, output_hidden_states=False, use_cache=False)
+
+            # Collect activations for this prompt (already on CPU)
+            if len(captured_activations) != n_layers:
+                raise RuntimeError(
+                    f"Expected {n_layers} layer activations, got {len(captured_activations)}"
+                )
+
+            all_activations.append(np.array(captured_activations))
+
+            # Clear GPU cache after each prompt to prevent fragmentation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    finally:
+        # Remove all hooks
+        for hook in hooks:
+            hook.remove()
+        # Restore original cache setting
+        model.config.use_cache = original_use_cache
+
+    # Stack into array: (n_prompts, n_layers, hidden_dim)
+    return np.array(all_activations)
+
+
+def _extract_activations_standard(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: List[str],
+    device: str
+) -> np.ndarray:
+    """
+    Standard activation extraction using output_hidden_states=True.
+
+    This is simpler but uses more GPU memory as all hidden states are stored.
+    May OOM on very large models like Kimi K2.
     """
     all_activations = []
 
     print(f"Extracting activations for {len(prompts)} prompts...")
 
     # Disable caching to avoid DynamicCache compatibility issues with newer transformers
-    # (get_usable_length was removed in transformers 4.46+, but some custom model code still uses it)
-    # We don't need caching for activation extraction anyway
     original_use_cache = getattr(model.config, 'use_cache', True)
     model.config.use_cache = False
 
@@ -423,6 +550,10 @@ def extract_activations(
                 layer_activations.append(layer_mean)
 
             all_activations.append(np.array(layer_activations))
+
+            # Clear GPU cache after each prompt
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     finally:
         # Restore original cache setting
